@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -48,64 +50,54 @@ func load(file *os.File) error {
 	return msgpack.Unmarshal(fileRead, &dataMap)
 }
 
-func SET(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	rwm.Lock()
-	defer rwm.Unlock()
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		http.Error(w, "key required", http.StatusBadRequest)
-		return
-	}
-	value := r.URL.Query().Get("value")
-	if value == "" {
-		http.Error(w, "value required", http.StatusBadRequest)
-		return
-	}
-	dataMap[key] = value
-	fmt.Fprintln(w, "ok")
-}
+func handleConn(conn net.Conn) {
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 3)
+		cmd := strings.ToUpper(parts[0])
 
-func GET(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+		switch cmd {
+		case "SET":
+			if len(parts) < 3 {
+				fmt.Fprintln(conn, "ERR usage: SET key value")
+				continue
+			}
+			rwm.Lock()
+			dataMap[parts[1]] = parts[2]
+			rwm.Unlock()
+			fmt.Fprintln(conn, "OK")
+		case "GET":
+			if len(parts) < 2 {
+				fmt.Fprintln(conn, "ERR usage: GET key")
+				continue
+			}
+			rwm.RLock()
+			value, ok := dataMap[parts[1]]
+			rwm.RUnlock()
+			if !ok {
+				fmt.Fprintln(conn, "nil")
+			} else {
+				fmt.Fprintln(conn, value)
+			}
+		case "DEL":
+			if len(parts) < 2 {
+				fmt.Fprintln(conn, "ERR usage: DEL key")
+				continue
+			}
+			rwm.Lock()
+			delete(dataMap, parts[1])
+			rwm.Unlock()
+			fmt.Fprintln(conn, "OK")
+		default:
+			fmt.Fprintln(conn, "ERR unknown command")
+		}
 	}
-	rwm.RLock()
-	defer rwm.RUnlock()
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		http.Error(w, "key required", http.StatusBadRequest)
-		return
-	}
-	value, ok := dataMap[key]
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprintln(w, "404 not found")
-		return
-	}
-	fmt.Fprint(w, value)
 }
-
-func DELETE(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	rwm.Lock()
-	defer rwm.Unlock()
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		http.Error(w, "key required", http.StatusBadRequest)
-		return
-	}
-	delete(dataMap, key)
-	fmt.Fprint(w, "ok")
-}
-
 func main() {
 	dataFile, err := os.OpenFile("data.msgpack", os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -138,20 +130,23 @@ func main() {
 		}
 	}()
 
-	http.HandleFunc("/set", SET)
-	http.HandleFunc("/get", GET)
-	http.HandleFunc("/del", DELETE)
-
-	shutdownChan := make(chan os.Signal, 1)
-	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
-
+	listener, err := net.Listen("tcp", ":6379")
+	if err != nil {
+		log.Println(err)
+		return
+	}
 	go func() {
-		fmt.Println("Server started! Port: 8080")
-		if err := http.ListenAndServe(":8080", nil); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
+		fmt.Println("Server started! Port: 6379")
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Fatalf("Server error: %v", err)
+			}
+			go handleConn(conn)
 		}
 	}()
-
+	shutdownChan := make(chan os.Signal, 1)
+	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 	<-shutdownChan
 	fmt.Println("\nStopping server, saving data...")
 	close(stopChan)
