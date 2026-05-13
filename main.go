@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	dataMap = make(map[string]any)
+	dataMap = make(map[string]string)
 	rwm     = sync.RWMutex{}
 	wg      = sync.WaitGroup{}
 )
@@ -111,7 +111,7 @@ func main() {
 		return
 	}
 	if dataMap == nil {
-		dataMap = make(map[string]any)
+		dataMap = make(map[string]string)
 	}
 
 	stopChan := make(chan struct{})
@@ -140,15 +140,21 @@ func main() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				log.Fatalf("Server error: %v", err)
+				log.Printf("Server error: %v\n", err)
+				return
 			}
-			go handleConn(conn)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handleConn(conn)
+			}()
 		}
 	}()
 	shutdownChan := make(chan os.Signal, 1)
 	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 	<-shutdownChan
 	fmt.Println("\nStopping server, saving data...")
+	listener.Close()
 	close(stopChan)
 	wg.Wait()
 	save(dataFile)
